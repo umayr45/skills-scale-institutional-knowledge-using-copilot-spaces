@@ -1,0 +1,127 @@
+name: AI Agent - Create Feature Branch
+
+run-name: Create feature branch for ${{ inputs.work_item }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      work_item:
+        description: "Story/task, for example: WPL-101 Add ASN validation"
+        required: true
+        type: string
+      base_branch:
+        description: "Branch from which the feature branch will be created"
+        required: true
+        default: "main"
+        type: string
+      branch_type:
+        description: "Branch prefix"
+        required: true
+        default: "feature"
+        type: choice
+        options:
+          - feature
+          - bugfix
+          - hotfix
+
+permissions:
+  contents: write
+
+jobs:
+  create-feature-branch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate branch name and create branch
+        id: create
+        uses: actions/github-script@v7
+        env:
+          WORK_ITEM: ${{ inputs.work_item }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          BRANCH_TYPE: ${{ inputs.branch_type }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workItem = process.env.WORK_ITEM.trim();
+            const baseBranch = process.env.BASE_BRANCH.trim();
+            const branchType = process.env.BRANCH_TYPE.trim();
+
+            // Keep an optional ticket ID at the front and convert the rest to kebab-case.
+            const ticketMatch = workItem.match(/\b([A-Za-z][A-Za-z0-9]*-\d+)\b/);
+            const ticket = ticketMatch ? ticketMatch[1].toLowerCase() : "";
+            const description = workItem
+              .replace(/\b[A-Za-z][A-Za-z0-9]*-\d+\b/, "")
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/^-+|-+$/g, "")
+              .replace(/-+/g, "-")
+              .slice(0, 60)
+              .replace(/-+$/g, "");
+
+            if (!description && !ticket) {
+              core.setFailed("The work item does not contain enough characters to generate a branch name.");
+              return;
+            }
+
+            const suffix = [ticket, description].filter(Boolean).join("-");
+            const branchName = `${branchType}/${suffix}`;
+
+            // Verify the base branch and read its latest commit SHA.
+            let baseRef;
+            try {
+              baseRef = await github.rest.git.getRef({
+                owner,
+                repo,
+                ref: `heads/${baseBranch}`
+              });
+            } catch (error) {
+              core.setFailed(`Base branch '${baseBranch}' was not found.`);
+              return;
+            }
+
+            // Fail safely instead of silently reusing an existing branch.
+            try {
+              await github.rest.git.getRef({
+                owner,
+                repo,
+                ref: `heads/${branchName}`
+              });
+              core.setFailed(`Branch '${branchName}' already exists.`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            await github.rest.git.createRef({
+              owner,
+              repo,
+              ref: `refs/heads/${branchName}`,
+              sha: baseRef.data.object.sha
+            });
+
+            const branchUrl = `https://github.com/${owner}/${repo}/tree/${branchName}`;
+            core.setOutput("branch_name", branchName);
+            core.setOutput("branch_url", branchUrl);
+
+            await core.summary
+              .addHeading("Feature branch created")
+              .addTable([
+                [{ data: "Field", header: true }, { data: "Value", header: true }],
+                ["Work item", workItem],
+                ["Base branch", baseBranch],
+                ["Created branch", branchName],
+                ["Status", "Success"]
+              ])
+              .addLink("Open the created branch", branchUrl)
+              .write();
+
+            core.notice(`Created '${branchName}' from '${baseBranch}'.`);
+
+      - name: Publish result
+        if: success()
+        run: |
+          echo "### Branch created successfully" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: \`${{ steps.create.outputs.branch_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Link: ${{ steps.create.outputs.branch_url }}" >> "$GITHUB_STEP_SUMMARY"
